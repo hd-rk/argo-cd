@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,12 +24,13 @@ var upgrader = func() websocket.Upgrader {
 
 // terminalSession implements PtyHandler
 type terminalSession struct {
-	wsConn    *websocket.Conn
-	sizeChan  chan remotecommand.TerminalSize
-	doneChan  chan struct{}
-	tty       bool
-	readLock  sync.Mutex
-	writeLock sync.Mutex
+	wsConn     *websocket.Conn
+	sizeChan   chan remotecommand.TerminalSize
+	doneChan   chan struct{}
+	tty        bool
+	readLock   sync.Mutex
+	writeLock  sync.Mutex
+	stdoutBuf  strings.Builder
 }
 
 // newTerminalSession create terminalSession
@@ -38,10 +40,10 @@ func newTerminalSession(w http.ResponseWriter, r *http.Request, responseHeader h
 		return nil, err
 	}
 	session := &terminalSession{
-		wsConn:   conn,
-		tty:      true,
-		sizeChan: make(chan remotecommand.TerminalSize),
-		doneChan: make(chan struct{}),
+		wsConn:     conn,
+		tty:        true,
+		sizeChan:   make(chan remotecommand.TerminalSize),
+		doneChan:   make(chan struct{}),
 	}
 	return session, nil
 }
@@ -88,15 +90,26 @@ func (t *terminalSession) Read(p []byte) (int, error) {
 
 // Write called from remotecommand whenever there is any output
 func (t *terminalSession) Write(p []byte) (int, error) {
+	data := string(p)
 	msg, err := json.Marshal(TerminalMessage{
 		Operation: "stdout",
-		Data:      string(p),
+		Data:      data,
 	})
 	if err != nil {
 		log.Errorf("write parse message err: %v", err)
 		return 0, err
 	}
 	t.writeLock.Lock()
+	log.Infof("[[%s]]", data)
+
+	if strings.HasPrefix(data, "\r") {
+		// log.Info("stdout: newline!")
+		log.Info(t.stdoutBuf.String())
+		t.stdoutBuf.Reset()
+	} else {
+		t.stdoutBuf.Write(p)
+	}
+
 	err = t.wsConn.WriteMessage(websocket.TextMessage, msg)
 	t.writeLock.Unlock()
 	if err != nil {
